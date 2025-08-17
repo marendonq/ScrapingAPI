@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     # Scraping
     CONCURRENCY: int = 12
     PAGE_DELAY_SECS: float = 0.2
-    MAX_PAGES: int | None = None  # None = sin límite
-
+    MAX_PAGES: int | None = None  # None = sin límite   
+    ENRICH_FROM_PRODUCT_DETAIL: bool = True  # ← leer breadcrumb (y opcionalmente otros campos) desde /.../p
+    
     model_config = SettingsConfigDict(env_prefix="SCRAPER_")
 
 settings = Settings()
