@@ -11,13 +11,25 @@ from ..domain.repositories import ProductRepository, CategoryRepository
 from ..utils.text import slugify
 from ..config import settings
 
+
 # -------------------------
 # Helpers de ruta
 # -------------------------
 def _resolve_db_path(raw: str | None) -> str:
-    """
-    Convierte DB_PATH a ruta absoluta y garantiza que el directorio exista.
-    Si llega relativa (p.ej. 'data/app.db'), la anclamos a la raíz del repo.
+    """Resuelve y garantiza la ruta a la base de datos.
+
+    Convierte `DB_PATH` en una ruta absoluta y asegura que el directorio exista.
+    Si la ruta es relativa (por ejemplo, ``'data/app.db'``), se ancla a la raíz del repo.
+
+    Args:
+      raw: Ruta recibida desde settings o ``None``.
+
+    Returns:
+      str: Ruta absoluta al archivo de base de datos.
+
+    Notes:
+      - Usa ``Path(__file__).resolve().parents[2]`` como raíz del proyecto cuando
+        la ruta no es absoluta.
     """
     default = "data/app.db"
     raw = (raw or default).strip()
@@ -28,21 +40,47 @@ def _resolve_db_path(raw: str | None) -> str:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return str(db_path)
 
+
 DEFAULT_DB_PATH = _resolve_db_path(getattr(settings, "DB_PATH", None))
+
 
 # -------------------------
 # Low-level DB helper
 # -------------------------
 class SQLiteDb:
+    """Administrador de conexión SQLite asíncrono con migraciones automáticas.
+
+    Gestiona la conexión a SQLite (aiosqlite), aplica PRAGMAs de rendimiento,
+    ejecuta migraciones y expone helpers de consulta.
+
+    Attributes:
+      db_path: Ruta absoluta al archivo de base de datos.
+      _conn: Conexión interna de aiosqlite. Se inicializa en ``lifespan()``.
+    """
+
     def __init__(self, db_path: str = DEFAULT_DB_PATH) -> None:
+        """Inicializa el helper SQLite con una ruta de base de datos.
+
+        Args:
+          db_path: Ruta por defecto de la DB. Puede ser sobreescrita por
+            ``settings.DB_PATH``.
+        """
         effective = getattr(settings, "DB_PATH", db_path)
         self.db_path: str = _resolve_db_path(effective)
         self._conn: aiosqlite.Connection | None = None
 
     @asynccontextmanager
     async def lifespan(self):
+        """Context manager asíncrono de vida de la conexión.
+
+        Abre la conexión a SQLite, configura PRAGMAs, asegura migración
+        y cierra automáticamente al salir del contexto.
+
+        Yields:
+          SQLiteDb: Instancia lista para ejecutar operaciones.
+        """
         self._conn = await aiosqlite.connect(self.db_path)
-        print(f"[SQLite] DB path: {self.db_path}")  # útil para verificar que miras el archivo correcto
+        print(f"[SQLite] DB path: {self.db_path}")
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL;")
         await self._conn.execute("PRAGMA foreign_keys=ON;")
@@ -57,6 +95,13 @@ class SQLiteDb:
             await self._conn.close()
 
     async def _migrate(self) -> None:
+        """Ejecuta migraciones de esquema si las tablas no existen.
+
+        Crea:
+          - ``categories`` (con índice por ``slug``)
+          - ``products`` (con índices por ``sku`` y ``codigo_categoria``)
+          - ``product_categories`` (tabla puente con PK compuesta)
+        """
         assert self._conn is not None
         await self._conn.executescript(
             """
@@ -94,45 +139,112 @@ class SQLiteDb:
         )
         await self._conn.commit()
 
-    # Helpers
     @property
     def conn(self) -> aiosqlite.Connection:
+        """Devuelve la conexión activa.
+
+        Returns:
+          aiosqlite.Connection: Conexión abierta.
+
+        Raises:
+          RuntimeError: Si la conexión no fue inicializada con ``lifespan()``.
+        """
         if self._conn is None:
             raise RuntimeError("SQLiteDb not initialized. Use within lifespan().")
         return self._conn
 
     async def executemany(self, sql: str, seq_of_params: Iterable[tuple]) -> None:
+        """Ejecuta múltiples sentencias SQL con parámetros en batch.
+
+        Args:
+          sql: Sentencia SQL con placeholders.
+          seq_of_params: Iterable de tuplas con los parámetros por ejecución.
+        """
         await self.conn.executemany(sql, seq_of_params)
 
     async def execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
+        """Ejecuta una sentencia SQL con parámetros.
+
+        Args:
+          sql: Sentencia SQL con placeholders.
+          params: Parámetros posicionales para la sentencia.
+
+        Returns:
+          aiosqlite.Cursor: Cursor resultante (puede usarse para fetch).
+        """
         return await self.conn.execute(sql, params)
 
     async def fetchone(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
+        """Ejecuta un SELECT y devuelve una sola fila.
+
+        Args:
+          sql: Consulta SELECT.
+          params: Parámetros posicionales para la consulta.
+
+        Returns:
+          aiosqlite.Row | None: Fila única o ``None`` si no hay resultados.
+        """
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
         return row
 
     async def fetchall(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
+        """Ejecuta un SELECT y devuelve todas las filas.
+
+        Args:
+          sql: Consulta SELECT.
+          params: Parámetros posicionales para la consulta.
+
+        Returns:
+          list[aiosqlite.Row]: Lista de filas retornadas por la consulta.
+        """
         cur = await self.conn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return list(rows)
 
+
 # -------------------------
 # Category Repository (SQLite)
 # -------------------------
 class SQLiteCategoryRepository(CategoryRepository):
+    """Repositorio de categorías sobre SQLite.
+
+    Permite asegurar una ruta de categorías (breadcrumbs) y listarlas.
+    """
+
     def __init__(self, db: SQLiteDb) -> None:
+        """Inicializa el repositorio con una conexión SQLite.
+
+        Args:
+          db: Helper de conexión/consultas a SQLite.
+        """
         self.db = db
 
     async def ensure_path(self, crumbs: list[dict]) -> list[Category]:
+        """Asegura la existencia de una ruta de categorías.
+
+        Para cada crumb:
+          * Si no existe el ``slug``, inserta una nueva categoría.
+          * Si existe, puede actualizar ``name``/``url`` si llegan valores nuevos.
+          * Devuelve objetos ``Category`` con ``id`` asignado.
+
+        Args:
+          crumbs: Lista de dicts con las claves ``name``, ``slug`` y opcionalmente ``url``.
+
+        Returns:
+          list[Category]: Categorías correspondientes al breadcrumb (en orden).
+
+        Raises:
+          RuntimeError: Si no se obtiene ``lastrowid`` al insertar una categoría nueva.
+        """
         out: list[Category] = []
         changed = False
         for c in crumbs:
             name = (c.get("name") or "").strip()
             slug = c.get("slug") or slugify(name) or ""
-            url  = c.get("url")
+            url = c.get("url")
             if not slug:
                 continue
             row = await self.db.fetchone(
@@ -166,17 +278,46 @@ class SQLiteCategoryRepository(CategoryRepository):
         return out
 
     async def list_all(self) -> list[Category]:
+        """Lista todas las categorías.
+
+        Returns:
+          list[Category]: Categorías ordenadas por ``id`` creciente.
+        """
         rows = await self.db.fetchall("SELECT id, name, slug, url FROM categories ORDER BY id")
         return [Category(id=int(r[0]), name=r[1], slug=r[2], url=r[3]) for r in rows]
+
 
 # -------------------------
 # Product Repository (SQLite)
 # -------------------------
 class SQLiteProductRepository(ProductRepository):
+    """Repositorio de productos sobre SQLite.
+
+    Permite upsert masivo de productos y listarlos con sus categorías asociadas.
+    """
+
     def __init__(self, db: SQLiteDb) -> None:
+        """Inicializa el repositorio con una conexión SQLite.
+
+        Args:
+          db: Helper de conexión/consultas a SQLite.
+        """
         self.db = db
 
     async def save_many(self, products: list[Product]) -> None:
+        """Inserta o actualiza múltiples productos con sus relaciones.
+
+        Estrategia:
+          * ``INSERT ... ON CONFLICT(url_producto) DO UPDATE``.
+          * Usa ``COALESCE`` para no sobreescribir valores existentes con ``NULL``.
+          * Reasigna la relación ``product_categories`` borrando y recreando vínculos.
+
+        Args:
+          products: Productos a persistir.
+
+        Raises:
+          Exception: Propaga cualquier error tras ejecutar ``ROLLBACK``.
+        """
         await self.db.execute("BEGIN")
         try:
             for p in products:
@@ -218,6 +359,7 @@ class SQLiteProductRepository(ProductRepository):
                     raise RuntimeError(f"No se encontró el producto recién upserted: {p.url_producto}")
                 product_id = int(row[0])
 
+                # Reasigna relaciones product_categories
                 await self.db.execute(
                     "DELETE FROM product_categories WHERE product_id=?",
                     (product_id,),
@@ -235,6 +377,11 @@ class SQLiteProductRepository(ProductRepository):
             raise
 
     async def list_all(self) -> list[Product]:
+        """Lista todos los productos con sus categorías asociadas.
+
+        Returns:
+          list[Product]: Productos con la lista ``categorias`` ya poblada.
+        """
         rows = await self.db.fetchall(
             """
             SELECT id, nombre, descripcion, precio, divisa, url_producto, image_url,
