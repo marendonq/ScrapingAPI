@@ -18,6 +18,6 @@ class Product(BaseModel):
     image_url: HttpUrl | None = None
     sku: str | None = None
     brand: str | None = None
-    categorias: List[Category] = Field(default_factory=list)  # raíz -> hoja (con IDs)
-    categoria: str | None = None                              # nombre hoja (conveniencia)
-    codigo_categoria: str | None = None                       # slug hoja (conveniencia)
+    categorias: List[Category] = Field(default_factory=list) 
+    categoria: str | None = None                              
+    codigo_categoria: str | None = None                       
