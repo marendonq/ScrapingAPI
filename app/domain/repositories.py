@@ -19,16 +19,12 @@ class InMemoryProductRepository:
         return list(self._items)
 
 # -------- Categorías --------
-class CategoryRepository(Protocol):
-    async def ensure_path(self, crumbs: list[dict]) -> list[Category]:
-        """
-        Asegura (crea si no existe) cada categoría del path y devuelve Category con ID.
-        `crumbs` = [{ "name": str, "slug": str|None, "url": str|None }, ...] raíz -> hoja
-        """
-        ...
+class NoopCategoryRepository:
+    async def ensure_path(self, crumbs: list[dict]):
+        return []  # no devuelve categorías; sólo permite que el servicio no falle
 
-    async def list_all(self) -> list[Category]: ...
-
+    async def list_all(self):
+        return []
 class InMemoryCategoryRepository:
     """
     Deduplica por `slug` (o slugify(name) si no viene). Asigna IDs incrementales.

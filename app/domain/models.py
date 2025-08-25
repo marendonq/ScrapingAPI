@@ -1,23 +1,36 @@
 from __future__ import annotations
-from pydantic import BaseModel, AnyUrl, Field, HttpUrl
-from typing import Optional, List
+from decimal import Decimal
+from typing import Annotated
+from pydantic import BaseModel, AnyUrl, Field, HttpUrl, StringConstraints, ConfigDict, constr
+from typing import List, Optional
 
 class Category(BaseModel):
     id: int | None = Field(default=None)
     name: str
     slug: str | None = None
     url: AnyUrl | None = None
+    parent_id: int = 0
+
+Short12 = Annotated[str, StringConstraints(max_length=12)]
+Short64 = Annotated[str, StringConstraints(max_length=64)]
+Short128 = Annotated[str, StringConstraints(max_length=128)]
 
 class Product(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)  # recorta espacios a todos los str
+
     id: int | None = Field(default=None)
-    nombre: str
-    descripcion: str | None = None
-    precio: float | None = None
-    divisa: str | None = None
-    url_producto: AnyUrl
-    image_url: HttpUrl | None = None
-    sku: str | None = None
-    brand: str | None = None
-    categorias: List[Category] = Field(default_factory=list) 
-    categoria: str | None = None                              
-    codigo_categoria: str | None = None                       
+    sku_id: Short12 | None = None
+    product_id: Short12 | None = None
+    nombre_producto: str
+    marca: Short64 | None = None
+    categoria_comerciante_id: Short128 | None = None
+    categoria_id: Short12 | None = None
+    nombre_categoria: Short128 | None = None
+    unidad: Short12 | None = None
+    precio: Decimal | None = None            
+    tipo_precio: Short12 | None = None
+    imagen: HttpUrl | None = None            #
+    url_producto: AnyUrl                      
+
+    # Soporte de navegación por UI
+    categorias: List[Category] = Field(default_factory=list)

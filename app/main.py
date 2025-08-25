@@ -4,23 +4,24 @@ from .config import settings
 from .http.client import HttpClient
 from .services.scraping_service import ScrapingService
 from .api.routes import init_routes, router
-from .storage.sqlite import SQLiteDb, SQLiteProductRepository, SQLiteCategoryRepository
+from .storage.postgresql import PgDb, PgProductRepository
+from .domain.repositories import NoopCategoryRepository
 
 http_client = HttpClient()
-db = SQLiteDb()  # usa settings.DB_PATH
+pg = PgDb()
 
 def build_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME)
 
-    product_repo = SQLiteProductRepository(db)
-    category_repo = SQLiteCategoryRepository(db)
+    product_repo = PgProductRepository(pg)
+    category_repo = NoopCategoryRepository()  
 
     service = ScrapingService(
         http=http_client,
         product_repo=product_repo,
         category_repo=category_repo,
         base_url=settings.BASE_URL,
-        start_path=settings.START_PATH,
+        start_path=settings.START_PATH
     )
 
     init_routes(service)
@@ -29,13 +30,13 @@ def build_app() -> FastAPI:
     async def _startup():
         app.state.http_lifespan = http_client.lifespan()
         await app.state.http_lifespan.__aenter__()
-        app.state.db_lifespan = db.lifespan()
-        await app.state.db_lifespan.__aenter__()
+        app.state.pg_lifespan = pg.lifespan()
+        await app.state.pg_lifespan.__aenter__()  # reemplaza SQLite por PG
 
     @app.on_event("shutdown")
     async def _shutdown():
         await app.state.http_lifespan.__aexit__(None, None, None)
-        await app.state.db_lifespan.__aexit__(None, None, None)
+        await app.state.pg_lifespan.__aexit__(None, None, None)
 
     app.include_router(router, prefix="")
     return app

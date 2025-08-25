@@ -5,32 +5,14 @@ from pathlib import Path
 import aiosqlite
 from contextlib import asynccontextmanager
 from typing import Iterable, List
+from decimal import Decimal
 
 from ..domain.models import Product, Category
-from ..domain.repositories import ProductRepository, CategoryRepository
-from ..utils.text import slugify
+from ..domain.repositories import ProductRepository, NoopCategoryRepository
+from ..utils.text import slugify, truncate
 from ..config import settings
 
-
-# -------------------------
-# Helpers de ruta
-# -------------------------
 def _resolve_db_path(raw: str | None) -> str:
-    """Resuelve y garantiza la ruta a la base de datos.
-
-    Convierte `DB_PATH` en una ruta absoluta y asegura que el directorio exista.
-    Si la ruta es relativa (por ejemplo, ``'data/app.db'``), se ancla a la raíz del repo.
-
-    Args:
-      raw: Ruta recibida desde settings o ``None``.
-
-    Returns:
-      str: Ruta absoluta al archivo de base de datos.
-
-    Notes:
-      - Usa ``Path(__file__).resolve().parents[2]`` como raíz del proyecto cuando
-        la ruta no es absoluta.
-    """
     default = "data/app.db"
     raw = (raw or default).strip()
     db_path = Path(raw)
@@ -40,45 +22,16 @@ def _resolve_db_path(raw: str | None) -> str:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return str(db_path)
 
-
 DEFAULT_DB_PATH = _resolve_db_path(getattr(settings, "DB_PATH", None))
 
-
-# -------------------------
-# Low-level DB helper
-# -------------------------
 class SQLiteDb:
-    """Administrador de conexión SQLite asíncrono con migraciones automáticas.
-
-    Gestiona la conexión a SQLite (aiosqlite), aplica PRAGMAs de rendimiento,
-    ejecuta migraciones y expone helpers de consulta.
-
-    Attributes:
-      db_path: Ruta absoluta al archivo de base de datos.
-      _conn: Conexión interna de aiosqlite. Se inicializa en ``lifespan()``.
-    """
-
     def __init__(self, db_path: str = DEFAULT_DB_PATH) -> None:
-        """Inicializa el helper SQLite con una ruta de base de datos.
-
-        Args:
-          db_path: Ruta por defecto de la DB. Puede ser sobreescrita por
-            ``settings.DB_PATH``.
-        """
         effective = getattr(settings, "DB_PATH", db_path)
         self.db_path: str = _resolve_db_path(effective)
         self._conn: aiosqlite.Connection | None = None
 
     @asynccontextmanager
     async def lifespan(self):
-        """Context manager asíncrono de vida de la conexión.
-
-        Abre la conexión a SQLite, configura PRAGMAs, asegura migración
-        y cierra automáticamente al salir del contexto.
-
-        Yields:
-          SQLiteDb: Instancia lista para ejecutar operaciones.
-        """
         self._conn = await aiosqlite.connect(self.db_path)
         print(f"[SQLite] DB path: {self.db_path}")
         self._conn.row_factory = aiosqlite.Row
@@ -95,13 +48,6 @@ class SQLiteDb:
             await self._conn.close()
 
     async def _migrate(self) -> None:
-        """Ejecuta migraciones de esquema si las tablas no existen.
-
-        Crea:
-          - ``categories`` (con índice por ``slug``)
-          - ``products`` (con índices por ``sku`` y ``codigo_categoria``)
-          - ``product_categories`` (tabla puente con PK compuesta)
-        """
         assert self._conn is not None
         await self._conn.executescript(
             """
@@ -113,21 +59,24 @@ class SQLiteDb:
             );
             CREATE INDEX IF NOT EXISTS ix_categories_slug ON categories(slug);
 
+            -- NUEVO esquema de products, alineado a la tabla de referencia
             CREATE TABLE IF NOT EXISTS products (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                nombre           TEXT NOT NULL,
-                descripcion      TEXT,
-                precio           REAL,
-                divisa           TEXT,
-                url_producto     TEXT NOT NULL UNIQUE,
-                image_url        TEXT,
-                sku              TEXT,
-                brand            TEXT,
-                categoria        TEXT,
-                codigo_categoria TEXT
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku_id                TEXT,         -- char(12)
+                product_id            TEXT,         -- char(12)
+                nombre_producto       TEXT NOT NULL,
+                marca                 TEXT,         -- varchar(64)
+                categoria_comerciante TEXT,         -- char(12)
+                categoria_id          TEXT,         -- char(12)
+                nombre_categoria      TEXT,         -- varchar(128)
+                unidad                TEXT,         -- char(12)
+                precio                TEXT,         -- guardamos Decimal como string cuantizada
+                tipo_precio           TEXT,         -- char(12)
+                imagen                TEXT,
+                url_producto          TEXT NOT NULL UNIQUE
             );
-            CREATE INDEX IF NOT EXISTS ix_products_sku ON products(sku);
-            CREATE INDEX IF NOT EXISTS ix_products_categoria ON products(codigo_categoria);
+            CREATE INDEX IF NOT EXISTS ix_products_sku_id ON products(sku_id);
+            CREATE INDEX IF NOT EXISTS ix_products_categoria_id ON products(categoria_id);
 
             CREATE TABLE IF NOT EXISTS product_categories (
                 product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
@@ -141,214 +90,135 @@ class SQLiteDb:
 
     @property
     def conn(self) -> aiosqlite.Connection:
-        """Devuelve la conexión activa.
-
-        Returns:
-          aiosqlite.Connection: Conexión abierta.
-
-        Raises:
-          RuntimeError: Si la conexión no fue inicializada con ``lifespan()``.
-        """
         if self._conn is None:
             raise RuntimeError("SQLiteDb not initialized. Use within lifespan().")
         return self._conn
 
     async def executemany(self, sql: str, seq_of_params: Iterable[tuple]) -> None:
-        """Ejecuta múltiples sentencias SQL con parámetros en batch.
-
-        Args:
-          sql: Sentencia SQL con placeholders.
-          seq_of_params: Iterable de tuplas con los parámetros por ejecución.
-        """
         await self.conn.executemany(sql, seq_of_params)
 
     async def execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
-        """Ejecuta una sentencia SQL con parámetros.
-
-        Args:
-          sql: Sentencia SQL con placeholders.
-          params: Parámetros posicionales para la sentencia.
-
-        Returns:
-          aiosqlite.Cursor: Cursor resultante (puede usarse para fetch).
-        """
         return await self.conn.execute(sql, params)
 
     async def fetchone(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
-        """Ejecuta un SELECT y devuelve una sola fila.
-
-        Args:
-          sql: Consulta SELECT.
-          params: Parámetros posicionales para la consulta.
-
-        Returns:
-          aiosqlite.Row | None: Fila única o ``None`` si no hay resultados.
-        """
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
         return row
 
     async def fetchall(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
-        """Ejecuta un SELECT y devuelve todas las filas.
-
-        Args:
-          sql: Consulta SELECT.
-          params: Parámetros posicionales para la consulta.
-
-        Returns:
-          list[aiosqlite.Row]: Lista de filas retornadas por la consulta.
-        """
         cur = await self.conn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return list(rows)
 
+# app/storage/sqlite.py
+from ..utils.text import slugify  # asegúrate de tenerlo importado
 
-# -------------------------
-# Category Repository (SQLite)
-# -------------------------
-class SQLiteCategoryRepository(CategoryRepository):
-    """Repositorio de categorías sobre SQLite.
-
-    Permite asegurar una ruta de categorías (breadcrumbs) y listarlas.
-    """
-
+class SQLiteCategoryRepository(NoopCategoryRepository):
     def __init__(self, db: SQLiteDb) -> None:
-        """Inicializa el repositorio con una conexión SQLite.
-
-        Args:
-          db: Helper de conexión/consultas a SQLite.
-        """
         self.db = db
 
     async def ensure_path(self, crumbs: list[dict]) -> list[Category]:
-        """Asegura la existencia de una ruta de categorías.
-
-        Para cada crumb:
-          * Si no existe el ``slug``, inserta una nueva categoría.
-          * Si existe, puede actualizar ``name``/``url`` si llegan valores nuevos.
-          * Devuelve objetos ``Category`` con ``id`` asignado.
-
-        Args:
-          crumbs: Lista de dicts con las claves ``name``, ``slug`` y opcionalmente ``url``.
-
-        Returns:
-          list[Category]: Categorías correspondientes al breadcrumb (en orden).
-
-        Raises:
-          RuntimeError: Si no se obtiene ``lastrowid`` al insertar una categoría nueva.
-        """
         out: list[Category] = []
-        changed = False
-        for c in crumbs:
+
+        for c in (crumbs or []):
             name = (c.get("name") or "").strip()
-            slug = c.get("slug") or slugify(name) or ""
-            url = c.get("url")
+            slug = c.get("slug") or slugify(name)  # fallback si no vino slug
+            url  = c.get("url")
+
+            # Si no hay slug ni con fallback, saltamos para no romper
             if not slug:
                 continue
+
+            # UPSERT atómico (evita UNIQUE constraint en concurrencia)
+            await self.db.execute(
+                """
+                INSERT INTO categories(name, slug, url)
+                VALUES(?, ?, ?)
+                ON CONFLICT(slug) DO UPDATE SET
+                    name=excluded.name,
+                    url=COALESCE(categories.url, excluded.url)
+                """,
+                (name, slug, url),
+            )
+
+            # Leer la fila recién insertada/actualizada
             row = await self.db.fetchone(
                 "SELECT id, name, slug, url FROM categories WHERE slug=?",
                 (slug,),
             )
+
+            # Si por alguna razón (muy raro) no aparece, comitea y reintenta una vez
             if row is None:
-                cur = await self.db.execute(
-                    "INSERT INTO categories(name, slug, url) VALUES(?,?,?)",
-                    (name, slug, url),
+                await self.db.conn.commit()
+                row = await self.db.fetchone(
+                    "SELECT id, name, slug, url FROM categories WHERE slug=?",
+                    (slug,),
                 )
-                cat_id = cur.lastrowid
-                if cat_id is None:
-                    raise RuntimeError("No se obtuvo lastrowid al insertar categoría")
-                out.append(Category(id=int(cat_id), name=name, slug=slug, url=url))
-                changed = True
-            else:
-                cat = Category(id=int(row[0]), name=row[1], slug=row[2], url=row[3])
-                updated = False
-                if name and cat.name != name:
-                    await self.db.execute("UPDATE categories SET name=? WHERE id=?", (name, cat.id))
-                    updated = True
-                if url and not cat.url:
-                    await self.db.execute("UPDATE categories SET url=? WHERE id=?", (url, cat.id))
-                    updated = True
-                if updated:
-                    changed = True
-                out.append(cat)
-        if changed:
-            await self.db.conn.commit()
+                if row is None:
+                    # No nos caemos: solo seguimos con el resto
+                    continue
+
+            # aiosqlite.Row permite indexar por posición
+            out.append(
+                Category(id=int(row[0]), name=row[1], slug=row[2], url=row[3])
+            )
+
+        await self.db.conn.commit()
         return out
 
-    async def list_all(self) -> list[Category]:
-        """Lista todas las categorías.
 
-        Returns:
-          list[Category]: Categorías ordenadas por ``id`` creciente.
-        """
+    async def list_all(self) -> list[Category]:
         rows = await self.db.fetchall("SELECT id, name, slug, url FROM categories ORDER BY id")
         return [Category(id=int(r[0]), name=r[1], slug=r[2], url=r[3]) for r in rows]
 
-
-# -------------------------
-# Product Repository (SQLite)
-# -------------------------
 class SQLiteProductRepository(ProductRepository):
-    """Repositorio de productos sobre SQLite.
-
-    Permite upsert masivo de productos y listarlos con sus categorías asociadas.
-    """
-
     def __init__(self, db: SQLiteDb) -> None:
-        """Inicializa el repositorio con una conexión SQLite.
-
-        Args:
-          db: Helper de conexión/consultas a SQLite.
-        """
         self.db = db
 
     async def save_many(self, products: list[Product]) -> None:
-        """Inserta o actualiza múltiples productos con sus relaciones.
-
-        Estrategia:
-          * ``INSERT ... ON CONFLICT(url_producto) DO UPDATE``.
-          * Usa ``COALESCE`` para no sobreescribir valores existentes con ``NULL``.
-          * Reasigna la relación ``product_categories`` borrando y recreando vínculos.
-
-        Args:
-          products: Productos a persistir.
-
-        Raises:
-          Exception: Propaga cualquier error tras ejecutar ``ROLLBACK``.
-        """
         await self.db.execute("BEGIN")
         try:
             for p in products:
+                # precio (Decimal|None) -> str o None
+                precio_str = str(p.precio) if p.precio is not None else None
+
                 await self.db.execute(
                     """
-                    INSERT INTO products (nombre, descripcion, precio, divisa, url_producto,
-                                          image_url, sku, brand, categoria, codigo_categoria)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO products (
+                        sku_id, product_id, nombre_producto, marca,
+                        categoria_comerciante, categoria_id, nombre_categoria,
+                        unidad, precio, tipo_precio, imagen, url_producto
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(url_producto) DO UPDATE SET
-                        nombre=excluded.nombre,
-                        descripcion=COALESCE(excluded.descripcion, products.descripcion),
+                        sku_id=COALESCE(excluded.sku_id, products.sku_id),
+                        product_id=COALESCE(excluded.product_id, products.product_id),
+                        nombre_producto=excluded.nombre_producto,
+                        marca=COALESCE(excluded.marca, products.marca),
+                        categoria_comerciante=COALESCE(excluded.categoria_comerciante, products.categoria_comerciante),
+                        categoria_id=COALESCE(excluded.categoria_id, products.categoria_id),
+                        nombre_categoria=COALESCE(excluded.nombre_categoria, products.nombre_categoria),
+                        unidad=COALESCE(excluded.unidad, products.unidad),
                         precio=COALESCE(excluded.precio, products.precio),
-                        divisa=COALESCE(excluded.divisa, products.divisa),
-                        image_url=COALESCE(excluded.image_url, products.image_url),
-                        sku=COALESCE(excluded.sku, products.sku),
-                        brand=COALESCE(excluded.brand, products.brand),
-                        categoria=COALESCE(excluded.categoria, products.categoria),
-                        codigo_categoria=COALESCE(excluded.codigo_categoria, products.codigo_categoria)
+                        tipo_precio=COALESCE(excluded.tipo_precio, products.tipo_precio),
+                        imagen=COALESCE(excluded.imagen, products.imagen)
                     ;
                     """,
                     (
-                        p.nombre,
-                        p.descripcion,
-                        p.precio,
-                        p.divisa,
+                        p.sku_id,
+                        p.product_id,
+                        p.nombre_producto,
+                        p.marca,
+                        p.categoria_comerciante_id,
+                        p.categoria_id,
+                        p.nombre_categoria,
+                        p.unidad,
+                        precio_str,
+                        p.tipo_precio,
+                        (str(p.imagen) if p.imagen else None),
                         str(p.url_producto),
-                        (str(p.image_url) if p.image_url else None),
-                        p.sku,
-                        p.brand,
-                        p.categoria,
-                        p.codigo_categoria,
                     ),
                 )
                 row = await self.db.fetchone(
@@ -359,7 +229,6 @@ class SQLiteProductRepository(ProductRepository):
                     raise RuntimeError(f"No se encontró el producto recién upserted: {p.url_producto}")
                 product_id = int(row[0])
 
-                # Reasigna relaciones product_categories
                 await self.db.execute(
                     "DELETE FROM product_categories WHERE product_id=?",
                     (product_id,),
@@ -377,15 +246,11 @@ class SQLiteProductRepository(ProductRepository):
             raise
 
     async def list_all(self) -> list[Product]:
-        """Lista todos los productos con sus categorías asociadas.
-
-        Returns:
-          list[Product]: Productos con la lista ``categorias`` ya poblada.
-        """
         rows = await self.db.fetchall(
             """
-            SELECT id, nombre, descripcion, precio, divisa, url_producto, image_url,
-                   sku, brand, categoria, codigo_categoria
+            SELECT id, sku_id, product_id, nombre_producto, marca,
+                   categoria_comerciante, categoria_id, nombre_categoria,
+                   unidad, precio, tipo_precio, imagen, url_producto
             FROM products
             ORDER BY id;
             """
@@ -403,23 +268,26 @@ class SQLiteProductRepository(ProductRepository):
             cats_by_pid.setdefault(int(pid), []).append(
                 Category(id=int(cid), name=name, slug=slug, url=url)
             )
+
         out: List[Product] = []
         for r in rows:
             pid = int(r[0])
+            precio = None if r[9] is None else Decimal(str(r[9]))
             out.append(
                 Product(
-                    id=pid,
-                    nombre=r[1],
-                    descripcion=r[2],
-                    precio=r[3],
-                    divisa=r[4],
-                    url_producto=r[5],
-                    image_url=r[6],
-                    sku=r[7],
-                    brand=r[8],
+                    sku_id=r[1],
+                    product_id=r[0],
+                    nombre_producto=r[3],
+                    marca=r[4],
+                    categoria_comerciante_id=r[5],
+                    categoria_id=r[6],
+                    nombre_categoria=r[7],
+                    unidad=r[8],
+                    precio=precio,
+                    tipo_precio=r[10],
+                    imagen=r[11],
+                    url_producto=r[12],
                     categorias=cats_by_pid.get(pid, []),
-                    categoria=r[9],
-                    codigo_categoria=r[10],
                 )
             )
         return out
