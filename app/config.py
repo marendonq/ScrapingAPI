@@ -2,10 +2,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "Casa Ferretera Scraper API"
-    BASE_URL: str = "https://www.casaferretera.com"
-    START_PATH: str = "/construcción-y-ferreteria?page=1"
+    APP_NAME: str = " Scraper API"
+    BASE_URL: str = "https://www.eurosupermercados.com.co"
+    START_PATH: str = ""
 
+    VTEX_PAGE_SIZE: int = 50
+    VTEX_MODE: str = "rest"  # rest | graphql
+    EURO_ENDPOINT_DEFAULT: str = "/api/catalog_system/pub/products/search/mercado"
 
     # --- PostgreSQL ---
     PG_DSN: str | None = "postgresql://postgres:sena2009QoMa@127.0.0.1:5432/postgres"
@@ -15,11 +18,11 @@ class Settings(BaseSettings):
     PG_PASSWORD: str = "sena2009QoMa"
     PG_DATABASE: str = "postgres"
     PG_SCHEMA: str = "public"
-    PG_TABLE: str = "productos_casaferretera"
+    PG_TABLE: str = "productos_euro"
 
 
     # HTTP
-    USER_AGENT: str = "CasaFerreteraScraper/1.0 (+contacto@example.com)"
+    USER_AGENT: str = "EUROScraper/1.0 (marendonq@gmail.com)"
     HTTP2: bool = True
     TIMEOUT_CONNECT: float = 5.0
     TIMEOUT_READ: float = 15.0

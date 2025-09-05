@@ -19,18 +19,18 @@ class Product(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)  # recorta espacios a todos los str
 
     id: int | None = Field(default=None)
-    sku_id: Short12 | None = None
-    product_id: Short12 | None = None
-    nombre_producto: str
-    marca: Short64 | None = None
-    categoria_comerciante_id: Short128 | None = None
-    categoria_id: Short12 | None = None
-    nombre_categoria: Short128 | None = None
-    unidad: Short12 | None = None
-    precio: Decimal | None = None            
-    tipo_precio: Short12 | None = None
-    imagen: HttpUrl | None = None            #
-    url_producto: AnyUrl                      
+    sku_id: Optional[Short12] = None
+    product_id: Optional[Short12] = None
+    nombre_producto: Optional[str] = None
+    marca: Optional[Short64] = None
+    categoria_comerciante_id: Optional[Short128]  = None
+    categoria_id: Optional[Short12] = None
+    nombre_categoria: Optional[Short128] = None
+    unidad: Optional[Short12] = None
+    precio: Optional[float] = None            
+    tipo_precio: Optional[Short12] = None
+    imagen: Optional[str] = None            #
+    url_producto: Optional[str] = None                     
 
     # Soporte de navegación por UI
     categorias: List[Category] = Field(default_factory=list)

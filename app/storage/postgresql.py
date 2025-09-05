@@ -42,6 +42,34 @@ class PgProductRepository(ProductRepository):
         self.schema = settings.PG_SCHEMA
         self.table = settings.PG_TABLE
 
+    async def ensure_schema(self) -> None:
+        ddl = f"""
+        CREATE SCHEMA IF NOT EXISTS {self.schema};
+
+        CREATE TABLE IF NOT EXISTS {self.schema}.{self.table} (
+            sku_id TEXT PRIMARY KEY,
+            product_id TEXT NULL,
+            nombre_producto TEXT NOT NULL,
+            marca TEXT NULL,
+            categoria_comerciante TEXT NULL,
+            categoria_id TEXT NULL,
+            nombre_categoria TEXT NULL,
+            unidad TEXT NULL,
+            precio MONEY NULL,
+            tipo_precio TEXT NULL,
+            imagen TEXT NULL,
+            url_producto TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_{self.table}_categoria ON {self.schema}.{self.table}(categoria_id);
+        CREATE INDEX IF NOT EXISTS idx_{self.table}_marca ON {self.schema}.{self.table}(marca);
+        """
+        async with self.db.pool.acquire() as conn:
+            async with conn.transaction():
+                for stmt in [s for s in ddl.split(";") if s.strip()]:
+                    await conn.execute(stmt + ";")
+
+
     async def save_many(self, products: list[Product]) -> None:
         if not products:
             return
@@ -114,7 +142,7 @@ class PgProductRepository(ProductRepository):
                     categoria_id=r["categoria_id"],
                     nombre_categoria=r["nombre_categoria"],
                     unidad=r["unidad"],
-                    precio=(None if r["precio_num"] is None else Decimal(r["precio_num"])),
+                    precio=(None if r["precio_num"] is None else float(r["precio_num"])),
                     tipo_precio=r["tipo_precio"],
                     imagen=r["imagen"],
                     url_producto=r["url_producto"],
